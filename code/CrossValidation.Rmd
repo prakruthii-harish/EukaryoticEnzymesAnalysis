@@ -1,0 +1,207 @@
+---
+title: "Cross-Validation-AGI-Project2"
+author: "Prakruthi Harish"
+date: "2025-04-14"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+
+```{r sad_algorithm, echo=FALSE}
+# Function to perform Spectral Analysis of Distributions (SAD)
+sad_analysis_kolker <- function(data_vector, min_period = 2, max_period = 200, min_length = 50, max_length = 600) {
+  # Create a frequency table of counts by length
+  # In Kolker's notation, Total_i is the number of occurrences of value i
+  
+  # Get the range of lengths
+  imin <- min_length
+  imax <- max_length
+  
+  # Create a Total vector where Total[i] is the count of proteins with length i
+  Total <- numeric(imax - imin + 1)
+  names(Total) <- imin:imax
+  
+  for (len in data_vector) {
+    if (len >= imin && len <= imax) {
+      Total[as.character(len)] <- Total[as.character(len)] + 1
+    }
+  }
+  
+  # Initialize results vectors
+  periods <- min_period:max_period
+  amplitudes <- numeric(length(periods))
+  
+  # For each period to test
+  for (p_idx in seq_along(periods)) {
+    j <- periods[p_idx]
+    
+    # Prepare for calculation
+    # Define the interval excluding half-periods from both ends
+    half_j <- floor(j/2)
+    interval_start <- imin + half_j
+    interval_end <- imax - half_j
+    
+    # Calculate the number of complete periods in the interval
+    m <- floor((interval_end - interval_start) / j) - 1
+    
+    if (m < 1) {
+      amplitudes[p_idx] <- 0
+      next
+    }
+    
+    # 1. Calculate non-oscillating background using weighted moving average
+    # Using Kolker's equation (1)
+    Nonosc <- numeric(imax - imin + 1)
+    names(Nonosc) <- imin:imax
+    
+    for (i in interval_start:interval_end) {
+      i_str <- as.character(i)
+      
+      # Sum over window of size j centered at i
+      window_sum <- 0
+      edge_correction <- 0
+      
+      for (k in -half_j:half_j) {
+        idx <- as.character(i + k)
+        if (idx %in% names(Total)) {
+          window_sum <- window_sum + Total[idx]
+        }
+        
+        # Handle edge effects as in Kolker's paper
+        if (k == -half_j || k == half_j) {
+          edge_correction <- edge_correction + (Total[idx] / 2)
+        }
+      }
+      
+      # Calculate the non-oscillating part using the formula from the paper
+      # Nonosc_i = (1/j) * Sum_{k=-int(j/2)}^{int(j/2)} Total_{i+k}
+      Nonosc[i_str] <- window_sum / j
+    }
+    
+    # 2. Calculate oscillating component by subtracting background from total
+    # Using Kolker's equation (2): Osc_i = Total_i - Nonosc_i
+    Osc <- numeric(imax - imin + 1)
+    names(Osc) <- imin:imax
+    
+    for (i in interval_start:interval_end) {
+      i_str <- as.character(i)
+      Osc[i_str] <- Total[i_str] - Nonosc[i_str]
+    }
+    
+    # 3. Apply cosine Fourier transform to get amplitude
+    # Using Kolker's equations (3) and (4)
+    valid_indices <- as.character(interval_start:interval_end)
+    
+    # Prepare for cosine transform
+    osc_values <- Osc[valid_indices]
+    lengths <- as.numeric(valid_indices)
+    
+    # Calculate cosine values
+    cos_values <- cos(2 * pi * lengths / j)
+    
+    # Calculate amplitude using Kolker's formula
+    # A_j = Sum_i(Osc_i * cos(2pi*i/j)) / Sum_i(cos^2(2pi*i/j))
+    numerator <- sum(osc_values * cos_values)
+    denominator <- sum(cos_values^2)
+    
+    if (denominator > 0) {
+      amplitudes[p_idx] <- numerator / denominator
+    } else {
+      amplitudes[p_idx] <- 0
+    }
+  }
+  
+  # Return results as a data frame
+  return(data.frame(period = periods, amplitude = amplitudes))
+}
+```
+
+
+
+```{r}
+
+# Load libraries
+library(tidyverse)
+
+# Load the dataset (assumes CSV is in working directory)
+file_path <- "/Users/akash/Documents/NYU/Spring/AI_GenAI/EukaryoticEnzymeAnalysis/diverse_eukaryotic_enzymes_preprocessed.csv"
+enzymes <- read_csv(file_path)
+
+# Filter for valid lengths
+enzymes <- enzymes %>%
+  filter(length >= 50, length <= 600)
+
+# Set number of folds for cross-validation
+k_folds <- 10
+
+# Assign folds randomly
+set.seed(42)
+enzymes <- enzymes %>%
+  mutate(fold = sample(1:k_folds, n(), replace = TRUE))
+
+# Initialize results table
+fold_results <- data.frame(
+  Fold = integer(),
+  Preferred_Period = numeric()
+)
+
+# Run SAD on each fold (90% data used, 10% held out)
+for (i in 1:k_folds) {
+  # Use 90% of data (exclude fold i)
+  train_data <- enzymes %>% filter(fold != i)
+  lengths <- train_data$length
+
+  # Run SAD on 90% data with specified period range
+  sad_result <- sad_analysis_kolker(lengths, min_period = 100, max_period = 150)
+
+  # Get period with max amplitude
+  peak_period <- sad_result$period[which.max(sad_result$amplitude)]
+
+  # Save result
+  fold_results <- rbind(fold_results, data.frame(
+    Fold = i,
+    Preferred_Period = peak_period
+  ))
+  cat("Processing fold", i, "...\n")
+}
+
+# Run SAD on full dataset with specified period range
+full_sad_result <- sad_analysis_kolker(enzymes$length, min_period = 100, max_period = 150)
+full_peak <- full_sad_result$period[which.max(full_sad_result$amplitude)]
+cat("\nPreferred Period from Full SAD:", full_peak, "aa\n")
+
+# Add metadata for plotting
+fold_results <- fold_results %>%
+  mutate(Source = "Cross-Validation")
+
+full_result_row <- data.frame(
+  Fold = 0,
+  Preferred_Period = full_peak,
+  Source = "Full Dataset"
+)
+
+combined_results <- bind_rows(fold_results, full_result_row)
+
+# Plot the results
+ggplot(combined_results %>% filter(Source == "Cross-Validation"), 
+       aes(x = Source, y = Preferred_Period)) +
+  geom_boxplot(outlier.shape = NA, fill = "skyblue", alpha = 0.6) +
+  geom_jitter(width = 0.1, size = 3, color = "navy") +
+  geom_point(data = combined_results %>% filter(Source == "Full Dataset"),
+             aes(x = Source, y = Preferred_Period),
+             color = "red", size = 5, shape = 18) +
+  labs(title = "Preferred Periods from SAD across Cross-Validation Folds",
+       subtitle = paste("Full dataset SAD peak =", full_peak, "aa"),
+       x = "", y = "Preferred Period (amino acids)") +
+  theme_minimal(base_size = 14)
+
+print(fold_results)
+
+```
+
+
+To validate the robustness of the detected ~126 amino acid periodicity, we performed 10-fold cross-validation, applying the SAD algorithm to each 90% subset. Across all folds, the preferred period consistently fell within the 120–130 amino acid range, with the full dataset SAD peak at 122 aa. This confirms the stability of the domain-size periodicity signal in eukaryotic enzymes.
